@@ -1,8 +1,10 @@
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
+import pandas as pd
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 import modulo_ninos, modulo_adultos, modulo_resumen
 
-# 1. Configuración (Layout centered es mejor para móvil)
+# 1. Configuración
 st.set_page_config(page_title="BBQ Manager", layout="centered", page_icon="⚽")
 
 st.markdown("""
@@ -11,7 +13,6 @@ st.markdown("""
     div.stButton > button { border-radius: 20px; }
     [data-testid="stSidebarNav"] { display: none; } 
     
-    /* FUERZA LAS BANDERAS EN HORIZONTAL Y SIN FONDO */
     [data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div:nth-child(1) [data-testid="stHorizontalBlock"] {
         gap: 0rem !important;
     }
@@ -19,7 +20,7 @@ st.markdown("""
     [data-testid="stSidebar"] div.stButton > button {
         border: none !important;
         background-color: transparent !important;
-        font-size: 28px !important; /* Un poco más grandes para que sea fácil darles con el dedo */
+        font-size: 28px !important;
         padding: 0px !important;
         box-shadow: none !important;
         width: auto !important;
@@ -27,33 +28,88 @@ st.markdown("""
         display: block !important;
     }
 
-    /* ELIMINA MARGENES EXTRA EN LA SIDEBAR */
     [data-testid="stSidebarUserContent"] {
         padding-top: 2rem !important;
     }
     </style>
     """, unsafe_allow_html=True)
 
-# 2. Conexión y Carga
-conn = st.connection("gsheets", type=GSheetsConnection)
+# 2. Función para conectar a Google Sheets
+@st.cache_resource
+def init_connection():
+    creds_dict = {
+        "type": st.secrets["connections"]["gsheets"]["type"],
+        "project_id": st.secrets["connections"]["gsheets"]["project_id"],
+        "private_key_id": st.secrets["connections"]["gsheets"]["private_key_id"],
+        "private_key": st.secrets["connections"]["gsheets"]["private_key"],
+        "client_email": st.secrets["connections"]["gsheets"]["client_email"],
+        "client_id": st.secrets["connections"]["gsheets"]["client_id"],
+        "auth_uri": st.secrets["connections"]["gsheets"]["auth_uri"],
+        "token_uri": st.secrets["connections"]["gsheets"]["token_uri"],
+        "auth_provider_x509_cert_url": st.secrets["connections"]["gsheets"]["auth_provider_x509_cert_url"],
+        "client_x509_cert_url": st.secrets["connections"]["gsheets"]["client_x509_cert_url"],
+    }
+    
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    client = gspread.authorize(creds)
+    return client
 
+# Función para leer datos - CON _client para evitar hashing
 @st.cache_data(ttl=600)
-def load_config():
-    import pandas as pd
-    sheet_id = "1L7P6i_vtAOonFxxiaM2Vk-mMka1rEJtfHCf9aJPmjco"
-    url_menu = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet=config_comida"
-    url_lang = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet=idiomas"
-    return pd.read_csv(url_menu), pd.read_csv(url_lang)
+def read_sheet(_client, sheet_id, worksheet_name):
+    sheet = _client.open_by_key(sheet_id)
+    worksheet = sheet.worksheet(worksheet_name)
+    data = worksheet.get_all_values()
+    if not data:
+        return pd.DataFrame()
+    headers = data[0]
+    rows = data[1:]
+    return pd.DataFrame(rows, columns=headers)
 
-df_menu, df_lang = load_config()
+# Función para actualizar datos (sin caché, no necesita decorador)
+def update_sheet(client, sheet_id, worksheet_name, df):
+    sheet = client.open_by_key(sheet_id)
+    worksheet = sheet.worksheet(worksheet_name)
+    worksheet.clear()
+    if not df.empty:
+        worksheet.update([df.columns.values.tolist()] + df.values.tolist())
+
+# Clase wrapper para mantener compatibilidad con los módulos
+class GSheetsConnection:
+    def __init__(self, client, sheet_id):
+        self.client = client
+        self.sheet_id = sheet_id
+    
+    def read(self, worksheet, ttl=0):
+        return read_sheet(self.client, self.sheet_id, worksheet)
+    
+    def update(self, worksheet, data):
+        update_sheet(self.client, self.sheet_id, worksheet, data)
+
+# Inicializar conexión
+client = init_connection()
+
+# Obtener el ID de la hoja desde el secrets
+sheet_url = st.secrets["connections"]["gsheets"]["spreadsheet"]
+sheet_id = sheet_url.split("/d/")[1].split("/")[0]
+conn = GSheetsConnection(client, sheet_id)
+
+# Cargar configuración - CON _client para evitar hashing
+@st.cache_data(ttl=600)
+def load_config(_client, _sheet_id):
+    df_menu = read_sheet(_client, _sheet_id, "config_comida")
+    df_lang = read_sheet(_client, _sheet_id, "idiomas")
+    return df_menu, df_lang
+
+df_menu, df_lang = load_config(client, sheet_id)
 
 # --- SIDEBAR ESTRUCTURADA ---
 with st.sidebar:
-    # A. SELECTOR DE IDIOMA (En una sola fila arriba)
+    # A. SELECTOR DE IDIOMA
     if 'lang_choice' not in st.session_state:
         st.session_state.lang_choice = 'Español'
     
-    # Creamos 2 columnas para las banderas
     col_banderas = st.columns(2)
     with col_banderas[0]:
         if st.button("🇪🇸", key="btn_es"):
@@ -75,18 +131,17 @@ with st.sidebar:
         format_func=lambda x: f"👦 {t.get('tab_kids')}" if x == "Niños" else (f"👨‍🏫 {t.get('tab_adults')}" if x == "Adultos" else f"🛒 {t.get('tab_resumen')}")
     )
 
-    # C. TU LOGO (Abajo del todo, muy pequeño y elegante)
-    # Usamos st.spacer o markdown para empujar el logo al fondo
+    # C. LOGO
     st.markdown("<br>" * 15, unsafe_allow_html=True) 
     st.divider()
     
-    # Aquí es donde achicamos el logo al máximo usando columnas laterales vacías
-    # El ratio [2, 1, 2] hace que el logo central sea pequeñito
     _, col_logo_fino, _ = st.columns([2, 1, 2]) 
     with col_logo_fino:
-        st.image("assets/logo.png", use_container_width=True)
+        try:
+            st.image("assets/logo.png", use_container_width=True)
+        except:
+            st.caption("📷 LDRV")
     
-    # Tu firma discreta
     st.markdown(
         "<div style='text-align: center; color: gray; font-size: 10px;'>"
         "Developed by LDRV</div>", 
