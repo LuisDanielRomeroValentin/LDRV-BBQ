@@ -55,9 +55,9 @@ def init_connection():
     client = gspread.authorize(creds)
     return client
 
-# Función para leer datos - CON _client para evitar hashing
-@st.cache_data(ttl=600)
-def read_sheet(_client, sheet_id, worksheet_name):
+# 3. Funciones de lectura - CACHÉ PARA CONFIGURACIÓN (no cambia)
+@st.cache_data(ttl=3600)  # 1 hora de caché para configuración
+def read_config(_client, sheet_id, worksheet_name):
     sheet = _client.open_by_key(sheet_id)
     worksheet = sheet.worksheet(worksheet_name)
     data = worksheet.get_all_values()
@@ -67,7 +67,18 @@ def read_sheet(_client, sheet_id, worksheet_name):
     rows = data[1:]
     return pd.DataFrame(rows, columns=headers)
 
-# Función para actualizar datos (sin caché, no necesita decorador)
+# 4. Función para pedidos - SIN CACHÉ (siempre actualizada)
+def read_orders(_client, sheet_id, worksheet_name):
+    sheet = _client.open_by_key(sheet_id)
+    worksheet = sheet.worksheet(worksheet_name)
+    data = worksheet.get_all_values()
+    if not data:
+        return pd.DataFrame()
+    headers = data[0]
+    rows = data[1:]
+    return pd.DataFrame(rows, columns=headers)
+
+# 5. Función para actualizar datos
 def update_sheet(client, sheet_id, worksheet_name, df):
     sheet = client.open_by_key(sheet_id)
     worksheet = sheet.worksheet(worksheet_name)
@@ -75,14 +86,19 @@ def update_sheet(client, sheet_id, worksheet_name, df):
     if not df.empty:
         worksheet.update([df.columns.values.tolist()] + df.values.tolist())
 
-# Clase wrapper para mantener compatibilidad con los módulos
+# 6. Clase wrapper para compatibilidad con los módulos
 class GSheetsConnection:
     def __init__(self, client, sheet_id):
         self.client = client
         self.sheet_id = sheet_id
     
     def read(self, worksheet, ttl=0):
-        return read_sheet(self.client, self.sheet_id, worksheet)
+        # Si es pedidos, usar read_orders (sin caché)
+        if worksheet == "pedidos":
+            return read_orders(self.client, self.sheet_id, worksheet)
+        else:
+            # Para config_comida, idiomas, bebidas - usar caché
+            return read_config(self.client, self.sheet_id, worksheet)
     
     def update(self, worksheet, data):
         update_sheet(self.client, self.sheet_id, worksheet, data)
@@ -95,14 +111,9 @@ sheet_url = st.secrets["connections"]["gsheets"]["spreadsheet"]
 sheet_id = sheet_url.split("/d/")[1].split("/")[0]
 conn = GSheetsConnection(client, sheet_id)
 
-# Cargar configuración - CON _client para evitar hashing
-@st.cache_data(ttl=600)
-def load_config(_client, _sheet_id):
-    df_menu = read_sheet(_client, _sheet_id, "config_comida")
-    df_lang = read_sheet(_client, _sheet_id, "idiomas")
-    return df_menu, df_lang
-
-df_menu, df_lang = load_config(client, sheet_id)
+# Cargar configuración (con caché)
+df_menu = read_config(client, sheet_id, "config_comida")
+df_lang = read_config(client, sheet_id, "idiomas")
 
 # --- SIDEBAR ESTRUCTURADA ---
 with st.sidebar:
@@ -114,10 +125,12 @@ with st.sidebar:
     with col_banderas[0]:
         if st.button("🇪🇸", key="btn_es"):
             st.session_state.lang_choice = 'Español'
+            st.cache_data.clear()  # Limpiar caché al cambiar idioma
             st.rerun()
     with col_banderas[1]:
         if st.button("🇬🇧", key="btn_en"):
             st.session_state.lang_choice = 'English'
+            st.cache_data.clear()  # Limpiar caché al cambiar idioma
             st.rerun()
     
     t = df_lang.set_index("Key")[st.session_state.lang_choice].to_dict()
