@@ -1,0 +1,17 @@
+# --- Seguridad ---
+# Ignora tus secretos locales (URL de GSheet, etc)
+.streamlit/secrets.toml
+
+# --- Python ---
+# Ignora carpetas de compilación y caché de Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# --- Otros ---
+# Ignora archivos temporales del sistema
+.DS_Store
+Thumbs.db
